@@ -1,10 +1,12 @@
-name: Test PSAU Monitor
+name: Auto Schedule PSAU Monitor
 
 on:
+  schedule:
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,5 +23,5 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
-      - name: Run monitor
-        run: python monitor.py
+      - name: Run check
+        run: python check_cron.py
