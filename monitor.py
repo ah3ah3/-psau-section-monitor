@@ -1,7 +1,10 @@
+import os
 import time
 import json
+import threading
 import urllib.request
 import urllib.parse
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from playwright.sync_api import sync_playwright
 
 URL = "https://eserve.psau.edu.sa/ku/ui/guest/timetable/index/scheduleTreeCoursesIndex.faces"
@@ -16,8 +19,21 @@ TARGETS = [
     {"code": "3201", "section": "2494"},
 ]
 
+is_busy = False
+
+# خادم وهمي خفيف لإبقاء Render مستقراً 24/7 دون إعادة تشغيل
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive and running!")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
+
 def send_telegram(message):
-    """إرسال رسالة إلى التيليجرام"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         data = urllib.parse.urlencode({
@@ -27,16 +43,15 @@ def send_telegram(message):
         req = urllib.request.Request(url, data=data)
         urllib.request.urlopen(req, timeout=10)
     except Exception as e:
-        print(f"⚠️ خطأ بالإرسال: {e}")
+        print(f"⚠️ فشل الإرسال: {e}")
 
 def get_updates(offset=None):
-    """قراءة الرسائل الواردة للبوت"""
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates?timeout=20"
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates?timeout=15"
         if offset:
             url += f"&offset={offset}"
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=25) as response:
+        with urllib.request.urlopen(req, timeout=20) as response:
             result = json.loads(response.read().decode("utf-8"))
             return result.get("result", [])
     except Exception:
@@ -59,9 +74,7 @@ def select_by_text(page, select_index, text_match):
     page.wait_for_timeout(2000)
 
 def check_all_sections():
-    """تشغيل الفحص وجلب تقرير كامل لجميع الشعب"""
     report = []
-    
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
@@ -69,11 +82,11 @@ def check_all_sections():
         page.goto(URL, wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(1500)
 
-        # المقر والدرجة
+        # 1. المقر والدرجة
         select_by_text(page, 0, "الخرج (طلاب)")
         select_by_text(page, 1, "بكالوريوس")
 
-        # فتح الشجرة
+        # 2. الشجرة
         page.locator("text=المقررات المطروحة").last.click()
         page.wait_for_timeout(2000)
         page.locator("text=التمريض بالخرج").first.click()
@@ -115,19 +128,19 @@ def check_all_sections():
             page.wait_for_load_state("networkidle")
             page.wait_for_timeout(3500)
 
-            # قراءة النتيجة
             rows_data = page.evaluate('''() => {
                 const list = [];
                 const trs = document.querySelectorAll("tr");
                 trs.forEach(tr => {
                     const tds = Array.from(tr.children).filter(c => c.tagName.toLowerCase() === 'td');
                     if (tds.length >= 7 && !tr.querySelector('table')) {
-                        list.push({
-                            code: tds[0].innerText.trim(),
-                            title: tds[1].innerText.trim(),
-                            section: tds[2].innerText.trim(),
-                            status: tds[6].innerText.trim()
-                        });
+                        const c = tds[0].innerText.trim();
+                        const t = tds[1].innerText.trim();
+                        const s = tds[2].innerText.trim();
+                        const st = tds[6].innerText.trim();
+                        if (s && /^\\d+$/.test(s)) {
+                            list.push({ code: c, title: t, section: s, status: st });
+                        }
                     }
                 });
                 return list;
@@ -140,19 +153,25 @@ def check_all_sections():
                     icon = "🟢" if "مفتوحة" in r["status"] else "🔴"
                     report.append(f"{icon} *{r['title']}*\n• الرمز: {r['code']} | الشعبة: {r['section']}\n• الحالة: {r['status']}")
                     break
-            
+
             if not found:
-                report.append(f"⚠️ *مادة {code} (شعبة {sec})* لم تظهر في البحث.")
+                report.append(f"⚠️ مادة {code} (شعبة {sec}) لم تظهر.")
 
         browser.close()
 
     return "\n\n".join(report)
 
 def main():
-    print("🤖 البوت يعمل الآن وينتظر أوامرك من التيليجرام...")
-    send_telegram("🤖 البوت جاهز ويعمل الآن!\n\nأرسل كلمة /check أو أي رسالة لبدء فحص الشعب.")
+    global is_busy
+    # تشغيل خادم الويب الخلفي
+    threading.Thread(target=run_dummy_server, daemon=True).start()
     
-    last_update_id = None
+    print("🚀 البوت متصل ومستقر الآن...")
+    send_telegram("🤖 البوت متصل الآن ومستقر!\n\nأرسل /check لفحص الشعب.")
+
+    # مسح الرسائل القديمة المكدسة لتفادي الرد المتكرر
+    initial_updates = get_updates()
+    last_update_id = initial_updates[-1]["update_id"] + 1 if initial_updates else None
 
     while True:
         updates = get_updates(last_update_id)
@@ -162,14 +181,20 @@ def main():
             sender_id = str(message.get("from", {}).get("id", ""))
             text = message.get("text", "")
 
-            # التأكد أن الرسالة واردة من حسابك أنت فقط
             if sender_id == TELEGRAM_CHAT_ID:
-                print(f"📩 تم استلام طلب فحص: {text}")
-                send_telegram("⏳ جاري الدخول على بوابة الجامعة وفحص الشعب...")
-                
-                # تنفيذ الفحص وإرسال التقرير
-                result_report = check_all_sections()
-                send_telegram(f"📊 *تقرير حالة الشعب الحالي:*\n\n{result_report}")
+                if is_busy:
+                    send_telegram("⏳ يوجد فحص جاري الآن، يرجى الانتظار بضع ثوانٍ...")
+                    continue
+
+                is_busy = True
+                send_telegram("⏳ جاري فحص الشعب الآن من بوابة الجامعة...")
+                try:
+                    result = check_all_sections()
+                    send_telegram(f"📊 تقرير حالة الشعب:\n\n{result}")
+                except Exception as e:
+                    send_telegram(f"⚠️ حدث خطأ أثناء الفحص: {e}")
+                finally:
+                    is_busy = False
 
         time.sleep(2)
 
