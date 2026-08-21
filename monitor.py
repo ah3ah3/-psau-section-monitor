@@ -3,11 +3,20 @@ from playwright.sync_api import sync_playwright
 
 URL = "https://eserve.psau.edu.sa/ku/ui/guest/timetable/index/scheduleTreeCoursesIndex.faces"
 
-TARGETS = {
-    "3104": "2481",
-    "3101": "2512",
-    "3201": "2494",
-}
+def select_option_by_text(page, text):
+    print(f"🔘 جاري اختيار: {text}...")
+    # العثور على الخيار وقراءة قيمته
+    option = page.locator(f"option:has-text('{text}')").first
+    option.wait_for(state="attached", timeout=15000)
+    val = option.get_attribute("value")
+    
+    # اختيار القيمة من القائمة المنسدلة التابعة له
+    select_elem = page.locator("select").filter(has=option).first
+    select_elem.select_option(value=val)
+    
+    # انتظار تحميل البيانات التلقائية للموقع
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(3000)
 
 def main():
     with sync_playwright() as p:
@@ -17,21 +26,17 @@ def main():
         print("🌐 فتح موقع الجامعة...")
         page.goto(URL, wait_until="networkidle", timeout=60000)
 
-        print("🔘 1. اختيار المقر: الخرج (طلاب)...")
-        page.get_by_text("الخرج (طلاب)", exact=False).first.click()
-        page.wait_for_timeout(2000)
+        # 1. اختيار المقر
+        select_option_by_text(page, "الخرج (طلاب)")
 
-        print("🔘 2. اختيار الدرجة: بكالوريوس...")
-        page.get_by_text("بكالوريوس", exact=False).first.click()
-        page.wait_for_timeout(2000)
+        # 2. اختيار الدرجة العلمية
+        select_option_by_text(page, "بكالوريوس")
 
-        print("🔘 3. اختيار الكلية: التمريض بالخرج...")
-        page.get_by_text("التمريض بالخرج", exact=False).first.click()
-        page.wait_for_timeout(2000)
+        # 3. اختيار الكلية
+        select_option_by_text(page, "التمريض بالخرج")
 
-        print("🔘 4. اختيار التخصص: علوم التمريض...")
-        page.get_by_text("علوم التمريض", exact=False).first.click()
-        page.wait_for_timeout(4000)
+        # 4. اختيار التخصص
+        select_option_by_text(page, "علوم التمريض")
 
         print("\n========== محتوى صفحة الشعب ==========\n")
         text = page.locator("body").inner_text()
