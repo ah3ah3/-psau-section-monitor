@@ -10,7 +10,6 @@ from playwright.sync_api import sync_playwright
 URL = "https://eserve.psau.edu.sa/ku/ui/guest/timetable/index/scheduleTreeCoursesIndex.faces"
 DATA_FILE = "targets.json"
 
-# بيانات التيليجرام الخاصة بك
 TELEGRAM_BOT_TOKEN = "8888125988:AAHOC7yNdnsQx-gloVDsID33UvYCvs-qH1A"
 TELEGRAM_CHAT_ID = "1163844992"
 
@@ -18,20 +17,24 @@ CHECK_INTERVAL_MINUTES = 3
 browser_lock = threading.Lock()
 data_lock = threading.Lock()
 
-# الشعب الافتراضية
+user_states = {}
+
 DEFAULT_TARGETS = [
-    {"code": "3104", "section": "2481"},
-    {"code": "3101", "section": "2512"},
-    {"code": "3201", "section": "2494"},
+    {"code": "3104", "section": "2481", "active": True},
+    {"code": "3101", "section": "2512", "active": True},
+    {"code": "3201", "section": "2494", "active": True},
 ]
 
 def load_targets():
-    """تحميل قائمة الشعب من الملف"""
     with data_lock:
         if os.path.exists(DATA_FILE):
             try:
                 with open(DATA_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    targets = json.load(f)
+                    for t in targets:
+                        if "active" not in t:
+                            t["active"] = True
+                    return targets
             except Exception:
                 pass
         with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -39,17 +42,15 @@ def load_targets():
         return DEFAULT_TARGETS
 
 def save_targets(targets):
-    """حفظ قائمة الشعب إلى الملف"""
     with data_lock:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(targets, f, ensure_ascii=False, indent=2)
 
-# خادم ويب لإبقاء Render مستقراً 24/7
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"PSAU Monitor Active with Dynamic Menu")
+        self.wfile.write(b"PSAU Monitor Active 24/7 with Interactive Menu")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
@@ -57,31 +58,82 @@ def run_dummy_server():
     server.serve_forever()
 
 def send_telegram(message, reply_markup=None):
-    """إرسال رسالة إلى التيليجرام مع دعم لوحة الأزرار"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message
-        }
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
         if reply_markup:
             payload["reply_markup"] = json.dumps(reply_markup)
-        
         data = urllib.parse.urlencode(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data)
         urllib.request.urlopen(req, timeout=10)
     except Exception as e:
         print(f"⚠️ فشل الإرسال: {e}")
 
+def answer_callback(callback_query_id, text=None):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        data = urllib.parse.urlencode(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data)
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
+
+def edit_telegram_message(message_id, text, reply_markup=None):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "message_id": message_id,
+            "text": text
+        }
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        data = urllib.parse.urlencode(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data)
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        print(f"⚠️ فشل تعديل الرسالة: {e}")
+
 def get_main_keyboard():
-    """لوحة التحكم بالأزرار في تيليجرام"""
     return {
         "keyboard": [
-            [{"text": "🔍 فحص الشعب"}, {"text": "📋 الشعب المراقبة"}],
-            [{"text": "ℹ️ تعليمات الإضافة والحذف"}]
+            [{"text": "⚙️ إدارة الشعب المراقبة"}, {"text": "🔍 فحص فوري"}],
+            [{"text": "➕ إضافة شعبة جديدة"}, {"text": "ℹ️ المساعدة"}]
         ],
         "resize_keyboard": True
     }
+
+def get_manage_keyboard():
+    targets = load_targets()
+    inline_keyboard = []
+
+    if not targets:
+        text = "📭 لا توجد شعب مضافة للمراقبة حالياً.\nاضغط على الزر بالأسفل لإضافة مادة وشعبة جديدة."
+    else:
+        text = "📋 *قائمة الشعب المراقبة:*\nاضغط على الأزرار لتفعيل/إيقاف التنبيه أو الحذف المباشر:"
+        for t in targets:
+            sec = t["section"]
+            code = t["code"]
+            is_active = t.get("active", True)
+
+            status_btn_text = f"🔔 مادة {code} (شعبة {sec})" if is_active else f"🔕 مادة {code} (شعبة {sec}) - موقف"
+            toggle_action = f"toggle_{sec}"
+            delete_action = f"del_{sec}"
+
+            inline_keyboard.append([
+                {"text": status_btn_text, "callback_data": toggle_action},
+                {"text": "🗑️ حذف", "callback_data": delete_action}
+            ])
+
+    inline_keyboard.append([
+        {"text": "➕ إضافة مادة جديدة", "callback_data": "btn_add"},
+        {"text": "🔍 فحص فوري الآن", "callback_data": "btn_check"}
+    ])
+
+    return text, {"inline_keyboard": inline_keyboard}
 
 def get_updates(offset=None):
     try:
@@ -142,8 +194,13 @@ def scrape_sections(is_auto=False):
             for item in targets:
                 code = item["code"]
                 sec = item["section"]
+                is_active = item.get("active", True)
 
-                # إدخال رمز المقرر
+                # إذا كان فحص تلقائي والشعبة موقف تنبيهها نتخطاها
+                if is_auto and not is_active:
+                    continue
+
+                # إدخال رمز المادة
                 page.evaluate(f'''() => {{
                     const inputs = document.querySelectorAll("input[type='text']");
                     if (inputs.length > 0) {{
@@ -196,9 +253,10 @@ def scrape_sections(is_auto=False):
                         found = True
                         is_open = "مفتوحة" in r["status"]
                         icon = "🟢" if is_open else "🔴"
-                        report.append(f"{icon} *{r['title']}*\n• الرمز: {r['code']} | الشعبة: {r['section']}\n• الحالة: {r['status']}")
+                        pause_tag = " (التنبيه موقّف 🔕)" if not is_active else ""
+                        report.append(f"{icon} *{r['title']}*{pause_tag}\n• الرمز: {r['code']} | الشعبة: {r['section']}\n• الحالة: {r['status']}")
 
-                        if is_open and is_auto:
+                        if is_open and is_auto and is_active:
                             alert_msg = (
                                 f"🚨 تنبيه عاجل: شعبة مفتوحة الآن!\n\n"
                                 f"📚 المقرر: {r['title']}\n"
@@ -231,8 +289,8 @@ def main():
     threading.Thread(target=auto_check_loop, daemon=True).start()
 
     send_telegram(
-        "🤖 أهلاً بك! لوحة التحكم بالشعب جاهزة الآن.\n\n"
-        "استخدم الأزرار بالأسفل للتحكم أو الأوامر السريعة.",
+        "🤖 أهلاً بك! تم تحديث نظام المراقبة.\n"
+        "يمكنك الآن التحكم بالشعب وإيقاف/تفعيل التنبيهات من خلال الأزرار التفاعلية.",
         reply_markup=get_main_keyboard()
     )
 
@@ -243,78 +301,115 @@ def main():
         updates = get_updates(last_update_id)
         for update in updates:
             last_update_id = update["update_id"] + 1
-            message = update.get("message", {})
-            sender_id = str(message.get("from", {}).get("id", ""))
-            text = message.get("text", "").strip()
 
-            if sender_id != TELEGRAM_CHAT_ID:
+            # 1. معالجة الضغط على أزرار القوائم (Callback Queries)
+            if "callback_query" in update:
+                cq = update["callback_query"]
+                cq_id = cq["id"]
+                data = cq.get("data", "")
+                msg = cq.get("message", {})
+                msg_id = msg.get("message_id")
+
+                # تفعيل أو إيقاف التنبيه لشعبة
+                if data.startswith("toggle_"):
+                    sec_to_toggle = data.replace("toggle_", "")
+                    targets = load_targets()
+                    for t in targets:
+                        if t["section"] == sec_to_toggle:
+                            t["active"] = not t.get("active", True)
+                            state_txt = "تم تفعيل التنبيه 🔔" if t["active"] else "تم إيقاف التنبيه مؤقتاً 🔕"
+                            answer_callback(cq_id, f"{state_txt} للشعبة {sec_to_toggle}")
+                            break
+                    save_targets(targets)
+                    txt, kb = get_manage_keyboard()
+                    edit_telegram_message(msg_id, txt, kb)
+
+                # حذف شعبة
+                elif data.startswith("del_"):
+                    sec_to_del = data.replace("del_", "")
+                    targets = load_targets()
+                    new_targets = [t for t in targets if t["section"] != sec_to_del]
+                    save_targets(new_targets)
+                    answer_callback(cq_id, f"🗑️ تم حذف الشعبة {sec_to_del}")
+                    txt, kb = get_manage_keyboard()
+                    edit_telegram_message(msg_id, txt, kb)
+
+                # زر إضافة مادة
+                elif data == "btn_add":
+                    user_states[TELEGRAM_CHAT_ID] = "WAITING_ADD"
+                    answer_callback(cq_id)
+                    send_telegram("✏️ أرسل الآن **رمز المقرر** متبوعاً بـ **رقم الشعبة** (بينهما مسافة):\n\nمثال:\n`3104 2481`")
+
+                # زر فحص فوري
+                elif data == "btn_check":
+                    answer_callback(cq_id, "⏳ جاري الفحص...")
+                    send_telegram("⏳ جاري فحص الشعب من بوابة الجامعة...")
+                    try:
+                        res = scrape_sections(is_auto=False)
+                        send_telegram(f"📊 تقرير حالة الشعب:\n\n{res}")
+                    except Exception as e:
+                        send_telegram(f"⚠️ حدث خطأ: {e}")
+
                 continue
 
-            # 1. فحص الشعب
-            if text in ["/check", "🔍 فحص الشعب"]:
-                send_telegram("⏳ جاري فحص الشعب من بوابة الجامعة...")
-                try:
-                    res = scrape_sections(is_auto=False)
-                    send_telegram(f"📊 تقرير حالة الشعب:\n\n{res}", reply_markup=get_main_keyboard())
-                except Exception as e:
-                    send_telegram(f"⚠️ حدث خطأ: {e}", reply_markup=get_main_keyboard())
+            # 2. معالجة الرسائل النصية العادية
+            if "message" in update:
+                message = update["message"]
+                sender_id = str(message.get("from", {}).get("id", ""))
+                text = message.get("text", "").strip()
 
-            # 2. عرض قائمة الشعب المراقبة
-            elif text in ["/list", "📋 الشعب المراقبة"]:
-                targets = load_targets()
-                if not targets:
-                    send_telegram("📭 لا توجد شعب مضافة للمراقبة حالياً.", reply_markup=get_main_keyboard())
-                else:
-                    msg = "📋 *الشعب المسجلة في المراقبة التلقائية:*\n\n"
-                    for idx, t in enumerate(targets, 1):
-                        msg += f"{idx}. رمز المادة: `{t['code']}` | الشعبة: `{t['section']}`\n"
-                    msg += "\nلحذف أي شعبة أرسل: `/del رقم_الشعبة`"
-                    send_telegram(msg, reply_markup=get_main_keyboard())
+                if sender_id != TELEGRAM_CHAT_ID:
+                    continue
 
-            # 3. إضافة شعبة جديدة
-            elif text.startswith("/add") or text.startswith("/اضافة") or text.startswith("اضافة"):
-                parts = text.split()
-                if len(parts) >= 3:
-                    c_code = parts[1]
-                    s_num = parts[2]
-                    targets = load_targets()
-                    # التحقق من عدم التكرار
-                    if any(t["section"] == s_num for t in targets):
-                        send_telegram(f"⚠️ الشعبة {s_num} موجودة بالفعل في قائمة المراقبة!", reply_markup=get_main_keyboard())
+                # حالة انتظار إدخال مادة جديدة
+                if user_states.get(sender_id) == "WAITING_ADD":
+                    user_states[sender_id] = None
+                    parts = text.split()
+                    if len(parts) >= 2:
+                        c_code = parts[0]
+                        s_num = parts[1]
+                        targets = load_targets()
+                        if any(t["section"] == s_num for t in targets):
+                            send_telegram(f"⚠️ الشعبة {s_num} موجودة مسبقاً في القائمة!", reply_markup=get_main_keyboard())
+                        else:
+                            targets.append({"code": c_code, "section": s_num, "active": True})
+                            save_targets(targets)
+                            send_telegram(f"✅ تمت إضافة المقرر `{c_code}` والشعبة `{s_num}` بنجاح!")
+                            txt, kb = get_manage_keyboard()
+                            send_telegram(txt, reply_markup=kb)
                     else:
-                        targets.append({"code": c_code, "section": s_num})
-                        save_targets(targets)
-                        send_telegram(f"✅ تمت إضافة المادة `{c_code}` والشعبة `{s_num}` بنجاح للمراقبة الدورية!", reply_markup=get_main_keyboard())
-                else:
-                    send_telegram("⚠️ طريقة الإضافة الصحيحة:\n`/add رمز_المادة رقم_الشعبة`\nمثال: `/add 3104 2481`", reply_markup=get_main_keyboard())
+                        send_telegram("⚠️ إدخال غير صحيح. تم إلغاء الإضافة. اضغط '➕ إضافة شعبة جديدة' للمحاولة مرة أخرى.", reply_markup=get_main_keyboard())
+                    continue
 
-            # 4. حذف شعبة من المراقبة
-            elif text.startswith("/del") or text.startswith("/حذف") or text.startswith("حذف"):
-                parts = text.split()
-                if len(parts) >= 2:
-                    s_num = parts[1]
-                    targets = load_targets()
-                    new_targets = [t for t in targets if t["section"] != s_num]
-                    if len(new_targets) < len(targets):
-                        save_targets(new_targets)
-                        send_telegram(f"🗑️ تم إيقاف المراقبة وحذف الشعبة `{s_num}` بنجاح.", reply_markup=get_main_keyboard())
-                    else:
-                        send_telegram(f"⚠️ الشعبة `{s_num}` غير موجودة في القائمة.", reply_markup=get_main_keyboard())
-                else:
-                    send_telegram("⚠️ طريقة الحذف الصحيحة:\n`/del رقم_الشعبة`\nمثال: `/del 2481`", reply_markup=get_main_keyboard())
+                # فتح قائمة إدارة الشعب
+                if text in ["⚙️ إدارة الشعب المراقبة", "📋 الشعب المراقبة", "/list"]:
+                    txt, kb = get_manage_keyboard()
+                    send_telegram(txt, reply_markup=kb)
 
-            # 5. المساعدة والتعليمات
-            elif text in ["/help", "/start", "ℹ️ تعليمات الإضافة والحذف"]:
-                help_msg = (
-                    "📌 *أوامر التحكم بالبوت:*\n\n"
-                    "➕ *إضافة شعبة:* `/add رمز_المادة رقم_الشعبة`\n"
-                    "مثال: `/add 3101 2512`\n\n"
-                    "➖ *حذف شعبة:* `/del رقم_الشعبة`\n"
-                    "مثال: `/del 2512`\n\n"
-                    "📋 *عرض الشعب:* اضغط زر (📋 الشعب المراقبة)\n"
-                    "🔍 *فحص فوري:* اضغط زر (🔍 فحص الشعب)"
-                )
-                send_telegram(help_msg, reply_markup=get_main_keyboard())
+                # طلب فحص فوري
+                elif text in ["🔍 فحص فوري", "🔍 فحص الشعب", "/check"]:
+                    send_telegram("⏳ جاري فحص الشعب من بوابة الجامعة...")
+                    try:
+                        res = scrape_sections(is_auto=False)
+                        send_telegram(f"📊 تقرير حالة الشعب:\n\n{res}", reply_markup=get_main_keyboard())
+                    except Exception as e:
+                        send_telegram(f"⚠️ حدث خطأ: {e}", reply_markup=get_main_keyboard())
+
+                # إضافة شعبة
+                elif text in ["➕ إضافة شعبة جديدة", "/add"]:
+                    user_states[sender_id] = "WAITING_ADD"
+                    send_telegram("✏️ أرسل الآن **رمز المقرر** و **رقم الشعبة** (بينهما مسافة):\n\nمثال:\n`3104 2481`")
+
+                # المساعدة
+                elif text in ["ℹ️ المساعدة", "/help", "/start"]:
+                    help_txt = (
+                        "🤖 *طريقة استخدام لوحة المراقبة:*\n\n"
+                        "1️⃣ اضغط على *⚙️ إدارة الشعب المراقبة* لعرض كل الشعب بأزرار تحكم تفاعلية.\n"
+                        "2️⃣ اضغط على اسم الشعبة للتبديل بين (🔔 مفعل) و (🔕 معطل).\n"
+                        "3️⃣ اضغط على زر *🗑️ حذف* لحذف الشعبة نهائياً.\n"
+                        "4️⃣ اضغط على *➕ إضافة شعبة جديدة* لإدخال أي مادة إضافية مباشرة."
+                    )
+                    send_telegram(help_txt, reply_markup=get_main_keyboard())
 
         time.sleep(2)
 
